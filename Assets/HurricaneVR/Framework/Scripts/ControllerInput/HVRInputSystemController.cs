@@ -150,7 +150,7 @@ namespace HurricaneVR.Framework.ControllerInput
 
                 if (action != null && _inputDevice != null)
                 {
-                    OpenXRInput.SendHapticImpulse(action, amplitude, frequency, duration, _inputDevice);
+                    // OpenXRInput.SendHapticImpulse(action, amplitude, frequency, duration, _inputDevice);
                     return;
                 }
             }
