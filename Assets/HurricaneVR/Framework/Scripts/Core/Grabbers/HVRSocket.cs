@@ -27,6 +27,9 @@ namespace HurricaneVR.Framework.Core.Grabbers
         [Tooltip("Releases the current grabbable if another valid one is in range")]
         public bool ReleasesOnHover;
 
+        [Tooltip("If true, the hand grabbing an object out of this will instantly bring the object to pose orientation.")]
+        public bool InstantHandPose;
+
         public SocketHoldType HoldType = SocketHoldType.Kinematic;
 
         [Tooltip("If supplied, this object will be cloned when one is removed.")]
@@ -57,7 +60,7 @@ namespace HurricaneVR.Framework.Core.Grabbers
         public bool CanRemoveGrabbable = true;
 
         [Tooltip("Scales the grabbable down to fit based on Size and the model bounds.")]
-        public bool ScaleGrabbable = true;
+        public bool ScaleGrabbable;
 
         [Tooltip("Grabbable scales down to this size along its longest extent.")]
         public float Size;
@@ -89,6 +92,10 @@ namespace HurricaneVR.Framework.Core.Grabbers
         [Tooltip("If supplied the hand will use this point when sorting distance to the closest socket instead of the socket position")]
         public Transform DistanceSource;
 
+
+        [Tooltip("If false, the socketed object colliders remain active, only works for static or kinematic rb sockets.")]
+        public bool DisableCollision = true;
+
         [Tooltip("Fires when an AutoSpawnedPrefab is instantiated.")]
         public SocketSpawnEvent SpawnedPrefab = new SocketSpawnEvent();
 
@@ -98,7 +105,6 @@ namespace HurricaneVR.Framework.Core.Grabbers
 
         protected Transform _previousParent;
         protected Vector3 _previousScale;
-        protected Bounds _modelBounds;
         protected bool _appQuitting;
         protected HVRGrabbable _timeoutGrabbable;
         protected float _mass;
@@ -134,12 +140,14 @@ namespace HurricaneVR.Framework.Core.Grabbers
         {
             base.Start();
 
-            if (HoldType == SocketHoldType.RemoveRigidbody)
+            if (!Rigidbody)
             {
-                if (!Rigidbody)
-                {
-                    Rigidbody = GetComponentInParent<Rigidbody>();
-                }
+                Rigidbody = GetComponentInParent<Rigidbody>();
+            }
+
+            if (Rigidbody && !Rigidbody.isKinematic && !DisableCollision)
+            {
+                Debug.LogWarning($"Sockets with a non kinematic rigidbody should not disable DisableCollision");
             }
 
             //if (!Rigidbody && HoldType == SocketHoldType.RemoveRigidbody)
@@ -362,7 +370,7 @@ namespace HurricaneVR.Framework.Core.Grabbers
             {
                 foreach (var action in HoverActions)
                 {
-                    if(action)
+                    if (action)
                         action.OnHoverExit(this, grabbable, IsValid(grabbable));
                 }
             }
@@ -467,30 +475,8 @@ namespace HurricaneVR.Framework.Core.Grabbers
             _previousParent = grabbable.transform.parent;
             _previousScale = grabbable.transform.localScale;
 
-            if (grabbable.Socketable && grabbable.Socketable.ScaleOverride)
-            {
-                var scaleBox = grabbable.Socketable.ScaleOverride;
 
-                var temp = scaleBox.enabled;
-
-                if (!scaleBox.enabled)
-                {
-                    scaleBox.enabled = true;
-                }
-
-                _modelBounds = scaleBox.bounds;
-
-                if (!temp)
-                {
-                    scaleBox.enabled = false;
-                }
-            }
-            else
-            {
-                _modelBounds = grabbable.ModelBounds;
-            }
-
-            grabbable.transform.parent = transform;
+            AttachGrabbable(grabbable);
             OnGrabbableParented(grabbable);
             HandleRigidBodyGrab(grabbable);
             PlaySocketedSFX(grabbable.Socketable);
@@ -499,6 +485,11 @@ namespace HurricaneVR.Framework.Core.Grabbers
             {
                 Grabbed.Invoke(this, grabbable);
             }
+        }
+
+        protected virtual void AttachGrabbable(HVRGrabbable grabbable)
+        {
+            grabbable.transform.parent = transform;
         }
 
         protected virtual Vector3 GetPositionOffset(HVRGrabbable grabbable)
@@ -563,7 +554,7 @@ namespace HurricaneVR.Framework.Core.Grabbers
             if (!grabbable.Rigidbody)
                 return;
 
-            
+
 
             switch (HoldType)
             {
@@ -575,7 +566,7 @@ namespace HurricaneVR.Framework.Core.Grabbers
                         grabbable.Rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
                         grabbable.Rigidbody.isKinematic = true;
                         grabbable.Rigidbody.interpolation = RigidbodyInterpolation.None;
-                        grabbable.SetAllToTrigger();
+                        if (DisableCollision) grabbable.SetAllToTrigger();
                     }
                     break;
                 case SocketHoldType.RemoveRigidbody:
@@ -665,20 +656,21 @@ namespace HurricaneVR.Framework.Core.Grabbers
 
         protected virtual void PlaySFX(AudioClip clip)
         {
-            if(SFXPlayer.Instance) SFXPlayer.Instance.PlaySFX(clip, transform.position);
+            if (SFXPlayer.Instance) SFXPlayer.Instance.PlaySFX(clip, transform.position);
         }
 
-
+        protected virtual float GetSocketableScaleSize(HVRSocketable socketable)
+        {
+            return socketable.GetSocketScaleSize();
+        }
 
         protected virtual void UpdateScale(HVRGrabbable grabbable)
         {
             if (!grabbable || !ScaleGrabbable)
                 return;
-            var extents = _modelBounds.extents;
-            var axis = extents.x;
-            if (extents.y > axis) axis = extents.y;
-            if (extents.z > axis) axis = extents.z;
-            axis *= 2;
+
+            var axis = GetSocketableScaleSize(grabbable.Socketable);
+
             var ratio = Size / axis;
             ratio *= grabbable.Socketable.SocketScale;
             var counterScale = grabbable.Socketable.CounterScale;
@@ -735,7 +727,7 @@ namespace HurricaneVR.Framework.Core.Grabbers
         }
 
 
-      
+
 
         protected virtual IEnumerator GrabTimeoutRoutine(HVRGrabbable grabbable)
         {

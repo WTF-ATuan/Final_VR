@@ -5,6 +5,7 @@ using System.Linq;
 using HurricaneVR.Framework.Components;
 using HurricaneVR.Framework.Core.Grabbers;
 using HurricaneVR.Framework.Core.HandPoser;
+using HurricaneVR.Framework.Core.Player;
 using HurricaneVR.Framework.Core.ScriptableObjects;
 using HurricaneVR.Framework.Core.Sockets;
 using HurricaneVR.Framework.Core.Stabbing;
@@ -24,22 +25,27 @@ namespace HurricaneVR.Framework.Core
 
         internal const int TrackedVelocityCount = 10;
 
-
         [Header("Grab Settings")]
+        
+        [Tooltip("Define grab behaviour, HandGrabber Default, Pull object to hand, Hand goes to the object.")]
+        public GrabBehaviour GrabBehaviour = GrabBehaviour.Default;
 
-
-        public HVRGrabType GrabType;
+        [FormerlySerializedAs("GrabType")] 
+        public PoseType PoseType;
+        
         public HVRGrabTracking TrackingType;
-        public HVRHoldType HoldType = HVRHoldType.AllowSwap;
+        
+        public HVRHoldType HoldType = HVRHoldType.Swap;
+        
         public HVRGrabControls GrabControl = HVRGrabControls.GripOrTrigger;
+        
         public bool OverrideGrabTrigger;
+        
         [DrawIf("OverrideGrabTrigger", true)]
         public HVRGrabTrigger GrabTrigger = HVRGrabTrigger.Active;
 
         [Tooltip("Does this grabbable require line of sight to the hand grabber to be grabbed?")]
         public bool RequireLineOfSight = true;
-
-
 
         [FormerlySerializedAs("ParentHandModelImmediately")]
         [Tooltip("Should the hand model pose immediately to this upon grabbing.")]
@@ -50,6 +56,9 @@ namespace HurricaneVR.Framework.Core
 
         [Tooltip("Released if the grabbable exceeds this distance from the grabber.")]
         public float BreakDistance = 1f;
+
+        [Tooltip("The grabbed object will compare it's distance to this when checking BreakDistance release.")]
+        public BreakDistanceSource BreakDistanceSource = BreakDistanceSource.NoDistanceCheck;
 
         [Tooltip("If true the object remains kinematic")]
         public bool RemainsKinematic = true;
@@ -86,7 +95,7 @@ namespace HurricaneVR.Framework.Core
 
         [Header("Configurable Joint Override")]
 
-        [Tooltip("If set it will override the default joint settings - recommended to override the hand settings instead.")]
+        [Tooltip("If set it will override the default joint settings.")]
         public HVRJointSettings JointOverride;
 
         [Header("Hand Joint Overrides")]
@@ -138,13 +147,10 @@ namespace HurricaneVR.Framework.Core
         public float OverlapTimeout = .10f;
 
         [Tooltip("Must be below this angle delta from expected hand pose and current hand orientation to create the final joint.")]
-        public float FinalJointMaxAngle = 40f;
+        public float FinalJointMaxAngle = 15f;
 
-        [Tooltip("If the joint target rotation doesn't need to be 0 you can turn this to true. Set to false for guns or items that you will apply force to.")]
-        public bool FinalJointQuick = true;
-
-        [Tooltip("If FinalJointQuick - how long do we try pulling into position before using the final joint settings.")]
-        public float FinalJointTimeout = .5f;
+        [Tooltip("How long do we try pulling into position before using the final joint settings.")]
+        public float FinalJointTimeout = .25f;
 
         [Tooltip("If assigned, Colliders will populate from these transforms, otherwise all children colliders of the object will be used (until another grabbable is found).")]
         public List<Transform> CollisionParents = new List<Transform>();
@@ -171,11 +177,24 @@ namespace HurricaneVR.Framework.Core
                  "is causing issues")]
         public HVRGrabbable MasterGrabbable;
 
+        [Tooltip("Used to determine a two handed grab across grabbable objects")]
+        public List<HVRGrabbable> LinkedGrabbables = new List<HVRGrabbable>();
+
         [Tooltip("Rigidbody CD will be set to this while held.")]
         public CollisionDetectionMode CollisionDetection = CollisionDetectionMode.ContinuousDynamic;
 
         [Tooltip("If grab type is snap and a pose couldn't resolve, should we try dynamic grabbing.")]
         public bool PhysicsPoserFallback = true;
+
+        [Tooltip("Enable override of max hand to controller distance reached behaviour")]
+        public bool OverrideMaxDistanceBehaviour;
+
+        [Tooltip("Override to change how the hand behaves after reaching max distance from the controller")]
+        [DrawIf("OverrideMaxDistanceBehaviour", true)]
+        public MaxDistanceBehaviour MaxDistanceBehaviour;
+
+       
+
 
         [Header("Debug")]
         public bool ShowBoundingBox;
@@ -323,8 +342,6 @@ namespace HurricaneVR.Framework.Core
         private bool _forceTwoHandSettings;
 
         private Vector3 _centerOfMass;
-        private Quaternion _inertiaRotation;
-        private Vector3 _inertiaTensor;
         private RigidbodyInterpolation _rbInterpolation;
         private float _mass;
         private bool _waitingForColDetectionReset;
@@ -370,17 +387,25 @@ namespace HurricaneVR.Framework.Core
                 Stabbable = GetComponentInChildren<HVRStabbable>();
             }
 
-            if (IsJointGrab && !Rigidbody)
+            //if (Stationary) Debug.LogWarning($"stationary {name}");
+
+            if (IsJointGrab && (!Rigidbody || RemainsKinematic && Rigidbody.isKinematic))
             {
                 Stationary = true;
             }
 
-            if (GrabColliders != null)
+            if (Stationary)
             {
-                GrabCollidersSet = new HashSet<Collider>(GrabColliders);
-                FilterGrabColliders = GrabColliders.Length > 0;
+                OverrideMaxDistanceBehaviour = true;
+                MaxDistanceBehaviour = MaxDistanceBehaviour.GrabbableDrops;
             }
+
+            SetupGrabColliders();
+
+
         }
+
+      
 
 
         protected virtual void Start()
@@ -510,6 +535,14 @@ namespace HurricaneVR.Framework.Core
                     var ourCollider = Colliders[j];
                     Physics.IgnoreCollision(otherCollider, ourCollider, ignore);
                 }
+            }
+        }
+
+        public void IgnoreCollision(Collider other, bool ignore = true)
+        {
+            for (int i = 0; i < Colliders.Count; i++)
+            {
+                Physics.IgnoreCollision(other, Colliders[i], ignore);
             }
         }
 
@@ -705,6 +738,29 @@ namespace HurricaneVR.Framework.Core
             }
         }
 
+        public virtual bool HasCollider(Collider c)
+        {
+            for (var k = 0; k < Colliders.Count; k++)
+            {
+                var gc = Colliders[k];
+                if (c == gc)
+                {
+                    return true;
+                }
+            }
+
+            for (var i = 0; i < AdditionalIgnoreColliders.Count; i++)
+            {
+                var gc = AdditionalIgnoreColliders[i];
+                if (c == gc)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// Loads grab points from the object with HVRGrabPoints component, if not found it we look
         /// for the first child object named "GrabPoints"
@@ -820,6 +876,19 @@ namespace HurricaneVR.Framework.Core
             }
 
             _releaseGrabbers.Clear();
+        }
+
+        /// <summary>
+        /// Returns true if any linked grabbable is held by a hand
+        /// </summary>
+        public bool AnyLinkedHandHeld()
+        {
+            if (LinkedGrabbables == null) return false;
+
+            for (int i = 0; i < LinkedGrabbables.Count; i++)
+                if (LinkedGrabbables[i].IsHandGrabbed) return true;
+
+            return false;
         }
 
         #endregion
@@ -1142,6 +1211,18 @@ namespace HurricaneVR.Framework.Core
             HasConcaveColliders = HasConcaveColliders || Colliders.Any(e => { var mesh = e as MeshCollider; return mesh && !mesh.convex; });
         }
 
+        /// <summary>
+        /// Caches GrabColliders array into a hashset for lookup for grab detection
+        /// </summary>
+        public void SetupGrabColliders()
+        {
+            if (GrabColliders != null)
+            {
+                GrabCollidersSet = new HashSet<Collider>(GrabColliders);
+                FilterGrabColliders = GrabColliders.Length > 0;
+            }
+        }
+
         public void UpdateIgnoreColliders()
         {
             _ignoredColliders.Clear();
@@ -1226,9 +1307,7 @@ namespace HurricaneVR.Framework.Core
                 OriginalCollisionMode = Rigidbody.collisionDetectionMode;
             }
 
-            _inertiaRotation = Rigidbody.inertiaTensorRotation;
             _centerOfMass = Rigidbody.centerOfMass;
-            _inertiaTensor = Rigidbody.inertiaTensor;
             _mass = Rigidbody.mass;
             _rbInterpolation = Rigidbody.interpolation;
         }
@@ -1456,5 +1535,18 @@ namespace HurricaneVR.Framework.Core
     public enum GrabpointFilter
     {
         Normal, ForceGrab, Socket
+    }
+
+    public enum GrabBehaviour
+    {
+        Default, PullToHand, HandRetrieves
+    }
+
+
+    public enum BreakDistanceSource
+    {
+        NoDistanceCheck,
+        Hand,
+        Controller,
     }
 }

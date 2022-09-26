@@ -381,9 +381,10 @@ namespace HurricaneVR.Editor
             gunGrabbable.OneHandJointSettings = _gripOneHand;
             gunGrabbable.TwoHandJointSettings = _gripTwoHand;
             poser.PrimaryPose.Pose = _gripPose;
-            gunGrabbable.HoldType = HVRHoldType.AllowSwap;
+            gunGrabbable.HoldType = HVRHoldType.Swap;
             gunGrabbable.RequireOverlapClearance = true;
             gunGrabbable.OverlapTimeout = 2f;
+            gunGrabbable.LinkedGrabbables = new List<HVRGrabbable>();
 
             //after grabpoints
             model = Instantiate(_gunPrefab, Vector3.zero, Quaternion.identity, root.transform) as GameObject;
@@ -455,7 +456,6 @@ namespace HurricaneVR.Editor
             grabbable.HoldType = HVRHoldType.OneHand;
             grabbable.DisableHandCollision = true;
             grabbable.PoseImmediately = true;
-            grabbable.Stationary = true;
             grabbable.ForceGrabbable = false;
             grabbable.TwoHandJointSettings = _stabilizerTwoHand;
             grabbable.ExtraIgnoreCollisionParents = new List<Transform>() { gunGrabbable.Rigidbody.transform };
@@ -473,6 +473,8 @@ namespace HurricaneVR.Editor
             var gunRB = hvrGunBase.GetRigidbody();
             grabbable.Rigidbody = gunRB;
             grabbable.MasterGrabbable = gunGrabbable;
+            
+            gunGrabbable.LinkedGrabbables.Add(grabbable);
 
             AddTriggerCollider(_stabilizerCollider, offhand);
 

@@ -6,14 +6,25 @@ namespace HurricaneVR.Framework.Core.Sockets
     {
         public HVRGrabbable Grabbable { get; private set; }
         public Transform SocketOrientation;
-        public float SocketScale = 1f;
+
 
         [Tooltip("If your grabbable model is not at 1,1,1 scale. ")]
         public Vector3 CounterScale = Vector3.one;
 
+        [Header("Scaling")]
+        [Tooltip("If true the the renderer bounds at the time of socketing will be used to scale the object in a socket that has scaling enabled.")]
+        public bool UseRendererBounds = true;
+
+        [Tooltip("If greater than 0 and UseRendererBounds is disabled, the size used when computing socket scale when socketing into a socket with scale enabled.")]
+        public float ScaleSize = 0f;
+
+        [Tooltip("Socket scale factor applied after socketing.")]
+        public float SocketScale = 1f;
+
         [Tooltip("Override renderer bounds when socket is scaling")]
         public BoxCollider ScaleOverride;
-        
+
+        [Header("SFX")]
         public AudioClip SocketedClip;
         public AudioClip UnsocketedClip;
 
@@ -43,6 +54,40 @@ namespace HurricaneVR.Framework.Core.Sockets
         private void Start()
         {
             Grabbable = GetComponent<HVRGrabbable>();
+        }
+
+        public virtual float GetSocketScaleSize()
+        {
+            Vector3 size;
+
+            if (ScaleOverride)
+            {
+                size = ScaleOverride.size;
+            }
+            else
+            {
+                if (!UseRendererBounds && ScaleSize > 0f)
+                {
+                    return ScaleSize;
+                }
+
+                //making sure the AABB is aligned the same every time before pulling the renderer bounds
+
+                var rot = transform.rotation;
+
+                transform.rotation = Quaternion.identity;
+
+                size = Grabbable.ModelBounds.size;
+
+                transform.rotation = rot;
+            }
+
+            var axis = size.x;
+
+            if (size.y > axis) axis = size.y;
+            if (size.z > axis) axis = size.z;
+
+            return axis;
         }
     }
 }

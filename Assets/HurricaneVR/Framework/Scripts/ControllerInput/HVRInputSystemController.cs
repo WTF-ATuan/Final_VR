@@ -2,6 +2,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using HurricaneVR.Framework.Core;
 using HurricaneVR.Framework.Shared;
 using UnityEngine;
 using UnityEngine.InputSystem;

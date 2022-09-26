@@ -95,9 +95,9 @@ namespace HurricaneVR.Framework.Core.Grabbers
 
         protected override void OnGrabbed(HVRGrabArgs args)
         {
-            //Debug.Log($"OnGrabbed");
-            if(!SocketContainer.TryAddGrabbable(args.Grabbable))
-                ForceRelease();
+            //socket cannot grab something if it's being held, so we force release it first so it's CanGrab will not return false
+            ForceRelease();
+            SocketContainer.TryAddGrabbable(args.Grabbable);
         }
     }
 }

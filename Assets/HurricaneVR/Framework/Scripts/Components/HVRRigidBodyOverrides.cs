@@ -35,6 +35,11 @@ namespace HurricaneVR.Framework.Components
             this.ExecuteNextUpdate(ApplyOverrides);
         }
 
+        protected virtual void OnValidate()
+        {
+            if (!Rigidbody) TryGetComponent(out Rigidbody);
+        }
+
         public void ApplyOverrides()
         {
             if (OverrideCOM)

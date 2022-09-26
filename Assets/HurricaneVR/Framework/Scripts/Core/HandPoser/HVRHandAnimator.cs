@@ -1,4 +1,5 @@
-﻿using HurricaneVR.Framework.Core.HandPoser.Data;
+﻿using System.Collections.Generic;
+using HurricaneVR.Framework.Core.HandPoser.Data;
 using HurricaneVR.Framework.Shared;
 using UnityEngine;
 using UnityEngine.Serialization;
@@ -13,7 +14,7 @@ namespace HurricaneVR.Framework.Core.HandPoser
         [Tooltip("True for floaty hands, false for FinalIK hands")]
         public bool PoseHand = true;
 
-        [Tooltip("If true the default poser will pause the hand")]
+        [Tooltip("If true the default poser will pose the hand's local position and rotation")]
         public bool DefaultPoseHand = true;
 
         [Tooltip("Finger bend speed when dynamic pose is active")]
@@ -48,6 +49,16 @@ namespace HurricaneVR.Framework.Core.HandPoser
         /// </summary>
         private HVRHandPoseData PrimaryPose;
 
+        /// <summary>
+        /// Blend poses are copied to this to apply finger curls to.
+        /// </summary>
+        private HVRHandPoseData BlendTarget;
+
+        /// <summary>
+        /// Keeps tracking of each blend pose target current value
+        /// </summary>
+        private readonly List<HVRHandPoseData> Blends = new List<HVRHandPoseData>(10);
+
 
         public bool IsMine { get; set; } = true;
 
@@ -65,7 +76,6 @@ namespace HurricaneVR.Framework.Core.HandPoser
 
         private bool _poseHand = true;
         private float[] _fingerCurls;
-        private float _lerp;
 
         protected virtual void Start()
         {
@@ -90,24 +100,28 @@ namespace HurricaneVR.Framework.Core.HandPoser
             DefaultPose = DefaultPoser.PrimaryPose.Pose.GetPose(Hand.IsLeft).DeepCopy();
             CurrentPose = DefaultPose.DeepCopy();
             BlendedPose = DefaultPose.DeepCopy();
+            BlendTarget = DefaultPose.DeepCopy();
 
             if (IsMine)
             {
                 FingerCurlSource = Hand.IsLeft ? HVRController.LeftFingerCurls : HVRController.RightFingerCurls;
             }
 
+            ValidateDefaultFingerType("Thumb", ref DefaultPoser.PrimaryPose.ThumbType);
+            ValidateDefaultFingerType("Index", ref DefaultPoser.PrimaryPose.IndexType);
+            ValidateDefaultFingerType("Middle", ref DefaultPoser.PrimaryPose.MiddleType);
+            ValidateDefaultFingerType("Ring", ref DefaultPoser.PrimaryPose.RingType);
+            ValidateDefaultFingerType("Pinky", ref DefaultPoser.PrimaryPose.PinkyType);
+
             ResetToDefault();
+        }
 
-
-            if (DefaultPoser.Blends != null)
+        private void ValidateDefaultFingerType(string fingerName, ref HVRFingerType finger)
+        {
+            if (finger == HVRFingerType.Close)
             {
-                for (var i = 0; i < DefaultPoser.Blends.Count; i++)
-                {
-                    if (DefaultPoser.Blends[i].Type == BlendType.Immediate)
-                    {
-                        DefaultPoser.Blends[i].Type = BlendType.Manual;
-                    }
-                }
+                //Debug.LogWarning($"{name} Default HVRHandPoser Primary Pose has Finger Curls [{fingerName}] set to Close. Setting to Static.");
+                finger = HVRFingerType.Static;
             }
         }
 
@@ -151,13 +165,7 @@ namespace HurricaneVR.Framework.Core.HandPoser
             if (DynamicPose)
             {
                 PrimaryPose.CopyTo(BlendedPose);
-
-                for (int i = 0; i < 5; i++)
-                {
-                    _lerps[i] = Time.deltaTime * DynamicPoseSpeed;
-                }
-
-                ApplyBlend(CurrentPose, BlendedPose, DefaultPoser.PrimaryPose);
+                ApplyBlend(CurrentPose, BlendedPose, DefaultPoser.PrimaryPose, DynamicPoseSpeed);
                 Hand.Pose(CurrentPose, false);
                 return;
             }
@@ -177,14 +185,7 @@ namespace HurricaneVR.Framework.Core.HandPoser
             if (!IsMine)
                 return;
 
-            var primaryLerp = UpdateBlend(CurrentPoser.PrimaryPose);
-
-            _handLerp += primaryLerp;
-
-            for (int i = 0; i < 5; i++)
-            {
-                _lerps[i] = primaryLerp;
-            }
+            UpdateBlendValue(CurrentPoser.PrimaryPose);
 
             if (CurrentPoser.Blends == null)
             {
@@ -193,44 +194,24 @@ namespace HurricaneVR.Framework.Core.HandPoser
 
             for (int i = 0; i < CurrentPoser.Blends.Count; i++)
             {
-                var blend = CurrentPoser.Blends[i];
-                if (blend.Disabled)
-                {
-                    continue;
-                }
-
-                var val = UpdateBlend(blend);
-
-                if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & HVRHandPoseMask.Hand) == HVRHandPoseMask.Hand)
-                {
-                    _handLerp += val;
-                }
-
-                for (int j = 0; j < 5; j++)
-                {
-                    HVRHandPoseMask mask;
-                    if (j == 0) mask = HVRHandPoseMask.Thumb;
-                    else if (j == 1) mask = HVRHandPoseMask.Index;
-                    else if (j == 2) mask = HVRHandPoseMask.Middle;
-                    else if (j == 3) mask = HVRHandPoseMask.Ring;
-                    else if (j == 4) mask = HVRHandPoseMask.Pinky;
-                    else continue;
-
-                    if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & mask) == mask)
-                    {
-                        _lerps[j] += val;
-                    }
-                }
-            }
-
-            for (int i = 0; i < 5; i++)
-            {
-                _lerps[i] = Mathf.Clamp01(_lerps[i]);
+                UpdateBlendValue(CurrentPoser.Blends[i]);
             }
         }
 
-        private float UpdateBlend(HVRHandPoseBlend blend)
+        /// <summary>
+        /// Updates the blend value depending on it's settings, immediate, button parameter, string parameter etc.
+        /// </summary>
+        /// <param name="blend"></param>
+        private void UpdateBlendValue(HVRHandPoseBlend blend)
         {
+            if (blend.Disabled)
+            {
+                blend.Value = 0f;
+                return;
+            }
+
+            if (blend.Type == BlendType.Manual) return;
+
             if (blend.Type == BlendType.Immediate)
             {
                 blend.Value = 1f;
@@ -245,7 +226,6 @@ namespace HurricaneVR.Framework.Core.HandPoser
                 else if (blend.Type == BlendType.FloatParameter)
                 {
                     blend.Value = button.Value;
-                    return blend.Value * blend.Weight;
                 }
             }
             else if (!string.IsNullOrWhiteSpace(blend.AnimationParameter) && blend.AnimationParameter != "None")
@@ -257,11 +237,8 @@ namespace HurricaneVR.Framework.Core.HandPoser
                 else if (blend.Type == BlendType.FloatParameter)
                 {
                     blend.Value = HVRAnimationParameters.GetFloatParameter(Hand.Side, blend.AnimationParameter);
-                    return blend.Value * blend.Weight;
                 }
             }
-
-            return Time.deltaTime * blend.Value * blend.Speed * blend.Weight;
         }
 
 
@@ -283,30 +260,34 @@ namespace HurricaneVR.Framework.Core.HandPoser
 
                     var blendPose = blend.Pose.GetPose(Hand.Side);
 
-                    if (blendPose == null)
-                        continue;
+                    if (blendPose == null) continue;
 
-                    ApplyFingerCurls(PrimaryPose, blendPose, BlendedPose, blend);
-                    UpdateTarget(BlendedPose, blendPose, BlendedPose, blend);
+                    blendPose.CopyTo(BlendTarget); //copied to apply the finger curls to prevent mucking up the original pose
+
+                    //apply finger curl to target pose
+                    ApplyFingerCurls(PrimaryPose, blendPose, BlendTarget, blend);
+
+                    //updated target pose by weighted value and speed
+                    UpdateBlendTarget(PrimaryPose, BlendTarget, Blends[i], blend);
+
+                    //update blended pose by weight to target
+                    UpdateBlendedPose(Blends[i], BlendedPose, blend);
                 }
             }
 
-            ApplyBlend(CurrentPose, BlendedPose, CurrentPoser.PrimaryPose);
+            ApplyBlend(CurrentPose, BlendedPose, CurrentPoser.PrimaryPose, CurrentPoser.PrimaryPose.Speed);
         }
 
-        private readonly float[] _lerps = new float[5];
-        private float _handLerp;
-
         /// <summary>
-        /// Adjusts the pose target by lerping between the hand relaxed pose and the current target hand pose
+        /// Adjusts the pose target by lerping between the hand relaxed pose and the target pose using finger curl tracking
         /// </summary>
-        private void ApplyFingerCurls(HVRHandPoseData startPose, HVRHandPoseData targetPose, HVRHandPoseData adjustedTarget, HVRHandPoseBlend blend)
+        private void ApplyFingerCurls(HVRHandPoseData startPose, HVRHandPoseData endPose, HVRHandPoseData targetPose, HVRHandPoseBlend blend)
         {
-            for (int i = 0; i < adjustedTarget.Fingers.Length; i++)
+            for (int i = 0; i < targetPose.Fingers.Length; i++)
             {
-                var adjustedTargetFinger = adjustedTarget.Fingers[i];
-                var startFinger = startPose.Fingers[i];
                 var targetFinger = targetPose.Fingers[i];
+                var startFinger = startPose.Fingers[i];
+                var endFinger = endPose.Fingers[i];
 
                 var fingerType = blend.GetFingerType(i);
 
@@ -326,62 +307,108 @@ namespace HurricaneVR.Framework.Core.HandPoser
                 curl = Mathf.Clamp(curl, 0f, 1f);
 
 
-                for (int j = 0; j < adjustedTargetFinger.Bones.Count; j++)
+                for (int j = 0; j < targetFinger.Bones.Count; j++)
                 {
-                    adjustedTargetFinger.Bones[j].Position = Vector3.Lerp(startFinger.Bones[j].Position, targetFinger.Bones[j].Position, curl);
-                    adjustedTargetFinger.Bones[j].Rotation = Quaternion.Lerp(startFinger.Bones[j].Rotation, targetFinger.Bones[j].Rotation, curl);
+                    targetFinger.Bones[j].Position = Vector3.Lerp(startFinger.Bones[j].Position, endFinger.Bones[j].Position, curl);
+                    targetFinger.Bones[j].Rotation = Quaternion.Lerp(startFinger.Bones[j].Rotation, endFinger.Bones[j].Rotation, curl);
                 }
             }
         }
 
-
-        private void UpdateTarget(HVRHandPoseData startPose, HVRHandPoseData targetPose, HVRHandPoseData blendedPose, HVRHandPoseBlend blend)
+        /// <summary>
+        /// Moves the blended pose towards the weight target lerp(start, end, value * weight) using the blend speed
+        /// </summary>
+        private void UpdateBlendTarget(HVRHandPoseData startPose, HVRHandPoseData endPose, HVRHandPoseData blendedPose, HVRHandPoseBlend blend)
         {
             var lerp = blend.Value * blend.Weight;
+            var blendLerp = blend.Speed < .01f ? 1f : blend.Speed * Time.deltaTime;
 
             if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & HVRHandPoseMask.Hand) == HVRHandPoseMask.Hand)
             {
-                blendedPose.Position = Vector3.Lerp(startPose.Position, targetPose.Position, _handLerp);
-                blendedPose.Rotation = Quaternion.Lerp(startPose.Rotation, targetPose.Rotation, _handLerp);
+                var targetPos = Vector3.Lerp(startPose.Position, endPose.Position, lerp);
+                var targetRot = Quaternion.Lerp(startPose.Rotation, endPose.Rotation, lerp);
+
+                blendedPose.Position = Vector3.Lerp(blendedPose.Position, targetPos, blendLerp);
+                blendedPose.Rotation = Quaternion.Lerp(blendedPose.Rotation, targetRot, blendLerp);
             }
 
             for (var i = 0; i < blendedPose.Fingers.Length; i++)
             {
                 var blendedFinger = blendedPose.Fingers[i];
-                var targetFinger = targetPose.Fingers[i];
+                var endFinger = endPose.Fingers[i];
                 var startFinger = startPose.Fingers[i];
 
-                HVRHandPoseMask mask;
-                if (i == 0) mask = HVRHandPoseMask.Thumb;
-                else if (i == 1) mask = HVRHandPoseMask.Index;
-                else if (i == 2) mask = HVRHandPoseMask.Middle;
-                else if (i == 3) mask = HVRHandPoseMask.Ring;
-                else if (i == 4) mask = HVRHandPoseMask.Pinky;
-                else continue;
+                if (!TryGetMask(i, out var mask)) continue;
 
                 if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & mask) == mask)
                 {
                     for (var j = 0; j < blendedFinger.Bones.Count; j++)
                     {
                         var blendedBone = blendedFinger.Bones[j];
-                        var targetBone = targetFinger.Bones[j];
+                        var endBone = endFinger.Bones[j];
                         var startBone = startFinger.Bones[j];
 
-                        blendedBone.Position = Vector3.Lerp(startBone.Position, targetBone.Position, lerp);
-                        blendedBone.Rotation = Quaternion.Lerp(startBone.Rotation, targetBone.Rotation, lerp);
+                        var targetPos = Vector3.Lerp(startBone.Position, endBone.Position, lerp);
+                        var targetRot = Quaternion.Lerp(startBone.Rotation, endBone.Rotation, lerp);
+
+                        blendedBone.Position = Vector3.Lerp(blendedBone.Position, targetPos, blendLerp);
+                        blendedBone.Rotation = Quaternion.Lerp(blendedBone.Rotation, targetRot, blendLerp);
                     }
                 }
             }
         }
 
-        private void ApplyBlend(HVRHandPoseData currentHand, HVRHandPoseData targetHandPose, HVRHandPoseBlend blend)
+        /// <summary>
+        /// Updates the blended pose to the blend target based on weighted value.
+        /// </summary>
+        private void UpdateBlendedPose(HVRHandPoseData targetPose, HVRHandPoseData blendedPose, HVRHandPoseBlend blend)
         {
             var lerp = blend.Value * blend.Weight;
 
             if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & HVRHandPoseMask.Hand) == HVRHandPoseMask.Hand)
             {
-                currentHand.Position = Vector3.Lerp(currentHand.Position, targetHandPose.Position, lerp);
-                currentHand.Rotation = Quaternion.Lerp(currentHand.Rotation, targetHandPose.Rotation, lerp);
+                blendedPose.Position = Vector3.Lerp(blendedPose.Position, targetPose.Position, lerp);
+                blendedPose.Rotation = Quaternion.Lerp(blendedPose.Rotation, targetPose.Rotation, lerp);
+            }
+
+            for (var i = 0; i < blendedPose.Fingers.Length; i++)
+            {
+                if (!TryGetMask(i, out var mask)) continue;
+
+                if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & mask) == mask)
+                {
+                    for (var j = 0; j < blendedPose.Fingers[i].Bones.Count; j++)
+                    {
+                        var blendedBone = blendedPose.Fingers[i].Bones[j];
+
+                        blendedBone.Position = Vector3.Lerp(blendedBone.Position, targetPose.Fingers[i].Bones[j].Position, lerp);
+                        blendedBone.Rotation = Quaternion.Lerp(blendedBone.Rotation, targetPose.Fingers[i].Bones[j].Rotation, lerp);
+                    }
+                }
+            }
+        }
+
+
+        private static bool TryGetMask(int i, out HVRHandPoseMask mask)
+        {
+            mask = HVRHandPoseMask.None;
+            if (i == 0) mask = HVRHandPoseMask.Thumb;
+            else if (i == 1) mask = HVRHandPoseMask.Index;
+            else if (i == 2) mask = HVRHandPoseMask.Middle;
+            else if (i == 3) mask = HVRHandPoseMask.Ring;
+            else if (i == 4) mask = HVRHandPoseMask.Pinky;
+            else return false;
+            return true;
+        }
+
+        private void ApplyBlend(HVRHandPoseData currentHand, HVRHandPoseData targetHandPose, HVRHandPoseBlend blend, float speed)
+        {
+            var blendLerp = speed < .01f ? 1f : speed * Time.deltaTime;
+
+            if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & HVRHandPoseMask.Hand) == HVRHandPoseMask.Hand)
+            {
+                currentHand.Position = Vector3.Lerp(currentHand.Position, targetHandPose.Position, blendLerp);
+                currentHand.Rotation = Quaternion.Lerp(currentHand.Rotation, targetHandPose.Rotation, blendLerp);
             }
 
             for (var i = 0; i < currentHand.Fingers.Length; i++)
@@ -389,13 +416,7 @@ namespace HurricaneVR.Framework.Core.HandPoser
                 var currentFinger = currentHand.Fingers[i];
                 var targetFinger = targetHandPose.Fingers[i];
 
-                HVRHandPoseMask mask;
-                if (i == 0) mask = HVRHandPoseMask.Thumb;
-                else if (i == 1) mask = HVRHandPoseMask.Index;
-                else if (i == 2) mask = HVRHandPoseMask.Middle;
-                else if (i == 3) mask = HVRHandPoseMask.Ring;
-                else if (i == 4) mask = HVRHandPoseMask.Pinky;
-                else continue;
+                if (!TryGetMask(i, out var mask)) continue;
 
                 if (blend.Mask == HVRHandPoseMask.None || (blend.Mask & mask) == mask)
                 {
@@ -404,14 +425,8 @@ namespace HurricaneVR.Framework.Core.HandPoser
                         var currentBone = currentFinger.Bones[j];
                         var targetBone = targetFinger.Bones[j];
 
-                        currentBone.Position = Vector3.Lerp(currentBone.Position, targetBone.Position, _lerps[i]);
-                        currentBone.Rotation = Quaternion.Lerp(currentBone.Rotation, targetBone.Rotation, _lerps[i]);
-
-                        //if (i == 1 && j == 0)
-                        //{
-                        //    if (Hand.Side == HVRHandSide.Right)
-                        //        Debug.Log($"{Quaternion.Angle(currentBone.Rotation, targetBone.Rotation)}");
-                        //}
+                        currentBone.Position = Vector3.Lerp(currentBone.Position, targetBone.Position, blendLerp);
+                        currentBone.Rotation = Quaternion.Lerp(currentBone.Rotation, targetBone.Rotation, blendLerp);
                     }
                 }
             }
@@ -427,7 +442,6 @@ namespace HurricaneVR.Framework.Core.HandPoser
 
         public void ResetToDefault()
         {
-            _poseHand = true;
             DynamicPose = false;
             if (DefaultPoser != null)
             {
@@ -446,7 +460,6 @@ namespace HurricaneVR.Framework.Core.HandPoser
             PrimaryPose = pose;
             _poseHand = false;
         }
-
         public void SetCurrentPoser(HVRHandPoser poser, bool poseHand = true)
         {
             _poseHand = poseHand;
@@ -457,15 +470,29 @@ namespace HurricaneVR.Framework.Core.HandPoser
             }
 
             CurrentPoser = poser;
-            if (poser == null)
-                return;
-
-            if (poser.PrimaryPose == null)
-            {
-                return;
-            }
+            if (poser == null || poser.PrimaryPose == null) return;
 
             PrimaryPose = poser.PrimaryPose.Pose.GetPose(Hand.IsLeft);
+
+            //set the currentpose to the current hand state
+            Hand.CopyHandData(CurrentPose);
+
+            //add blends to cache if necessary
+            if (poser.Blends.Count > Blends.Count)
+            {
+                var count = Blends.Count;
+                for (int i = 0; i < poser.Blends.Count - count; i++)
+                {
+                    Blends.Add(DefaultPose.DeepCopy());
+                }
+            }
+
+           
+            for (var i = 0; i < poser.Blends.Count; i++)
+            {
+                poser.Blends[i].Value = 0f;  //reset blend weight
+                PrimaryPose.CopyTo(Blends[i]); //copy primary pose to the blend pose as a base
+            }
         }
     }
 }
